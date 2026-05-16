@@ -1,0 +1,566 @@
+openapi: 3.1.0
+info:
+  title: RuFeedback Classifier API
+  version: 0.1.0
+  description: REST contract for the local Russian feedback classification service.
+servers:
+  - url: /api/v1
+    description: Public API path behind Nginx
+tags:
+  - name: Health
+  - name: Model
+  - name: Predictions
+  - name: Stats
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      summary: Liveness check
+      responses:
+        "200":
+          description: Application process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessResponse"
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: Readiness check
+      responses:
+        "200":
+          description: Model, database, and migrations are ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          description: At least one dependency is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Aggregate UI-friendly health status
+      responses:
+        "200":
+          description: Aggregate health state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service is alive but not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /model/info:
+    get:
+      tags: [Model]
+      operationId: getModelInfo
+      summary: Model metadata, limits, labels, and metrics
+      responses:
+        "200":
+          description: Model profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelInfoResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /analyze:
+    post:
+      tags: [Predictions]
+      operationId: analyzeFeedback
+      summary: Classify one Russian feedback text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalyzeRequest"
+            examples:
+              complaint:
+                value:
+                  text: "Доставка опоздала на два дня, поддержка не отвечает"
+      responses:
+        "200":
+          description: Saved prediction result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PredictionResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /batch-analyze:
+    post:
+      tags: [Predictions]
+      operationId: analyzeFeedbackBatch
+      summary: Classify a bounded batch of Russian feedback texts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchAnalyzeRequest"
+            examples:
+              mixed:
+                value:
+                  texts:
+                    - "Спасибо, все отлично!"
+                    - "Когда будет доставка?"
+                    - "Приложение не работает после обновления"
+      responses:
+        "200":
+          description: Saved prediction results for every input item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchPredictionResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /predictions:
+    get:
+      tags: [Predictions]
+      operationId: listPredictions
+      summary: List recent prediction history
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: label
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/FeedbackLabel"
+      responses:
+        "200":
+          description: Bounded prediction history page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PredictionListResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /predictions/{prediction_id}:
+    get:
+      tags: [Predictions]
+      operationId: getPrediction
+      summary: Retrieve one prediction by id
+      parameters:
+        - name: prediction_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Full prediction detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PredictionDetailResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /stats:
+    get:
+      tags: [Stats]
+      operationId: getPredictionStats
+      summary: Aggregate prediction statistics
+      responses:
+        "200":
+          description: Aggregate statistics derived from prediction history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /metrics:
+    get:
+      tags: [Stats]
+      operationId: getPrometheusMetrics
+      summary: Prometheus metrics endpoint
+      servers:
+        - url: /
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+components:
+  responses:
+    ValidationError:
+      description: Request validation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            detail: "Prediction not found"
+    ServiceUnavailable:
+      description: Model, database, or migrations are not ready.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            detail: "Model is not loaded"
+    RateLimited:
+      description: Public API request rate exceeded at Nginx.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            detail: "Rate limit exceeded"
+    InternalError:
+      description: Unexpected inference, persistence, or service error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    FeedbackLabel:
+      type: string
+      enum: [complaint, question, praise, other]
+    AnalyzeRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 3
+          maxLength: 2000
+          description: Russian feedback text to classify.
+          examples:
+            - "Доставка опоздала, я недоволен"
+    BatchAnalyzeRequest:
+      type: object
+      additionalProperties: false
+      required: [texts]
+      properties:
+        texts:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: string
+            minLength: 3
+            maxLength: 2000
+    ProbabilityDistribution:
+      type: object
+      additionalProperties: false
+      required: [complaint, question, praise, other]
+      properties:
+        complaint:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        question:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        praise:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        other:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+    PredictionResponse:
+      type: object
+      additionalProperties: false
+      required: [id, text, label, confidence, probabilities, processing_time_ms, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        text:
+          type: string
+        label:
+          $ref: "#/components/schemas/FeedbackLabel"
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        probabilities:
+          $ref: "#/components/schemas/ProbabilityDistribution"
+        processing_time_ms:
+          type: number
+          format: float
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+    PredictionDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [id, text, label, confidence, probabilities, processing_time_ms, created_at, model_name, model_version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        text:
+          type: string
+        label:
+          $ref: "#/components/schemas/FeedbackLabel"
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        probabilities:
+          $ref: "#/components/schemas/ProbabilityDistribution"
+        processing_time_ms:
+          type: number
+          format: float
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+        model_name:
+          type: string
+        model_version:
+          type: string
+    BatchPredictionResponse:
+      type: object
+      additionalProperties: false
+      required: [items, processing_time_ms]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PredictionResponse"
+        processing_time_ms:
+          type: number
+          format: float
+          minimum: 0
+    PredictionSummary:
+      type: object
+      additionalProperties: false
+      required: [id, text, label, confidence, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        text:
+          type: string
+        label:
+          $ref: "#/components/schemas/FeedbackLabel"
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        created_at:
+          type: string
+          format: date-time
+    PredictionListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, limit, offset, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PredictionSummary"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+    ModelInfoResponse:
+      type: object
+      additionalProperties: false
+      required: [model_name, version, labels, max_text_length, max_batch_size, loaded]
+      properties:
+        model_name:
+          type: string
+        version:
+          type: string
+        labels:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/FeedbackLabel"
+        max_text_length:
+          type: integer
+          minimum: 3
+          default: 2000
+        max_batch_size:
+          type: integer
+          minimum: 1
+          default: 32
+        loaded:
+          type: boolean
+        metrics:
+          anyOf:
+            - $ref: "#/components/schemas/ModelMetrics"
+            - type: "null"
+    ModelMetrics:
+      type: object
+      additionalProperties:
+        type: number
+      properties:
+        accuracy:
+          type: number
+          minimum: 0
+          maximum: 1
+        macro_f1:
+          type: number
+          minimum: 0
+          maximum: 1
+    LivenessResponse:
+      type: object
+      additionalProperties: false
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          enum: [alive]
+        service:
+          type: string
+          enum: [backend]
+    ReadinessResponse:
+      type: object
+      additionalProperties: false
+      required: [status, model_loaded, database_available, migrations_applied]
+      properties:
+        status:
+          type: string
+          enum: [ready, unavailable]
+        model_loaded:
+          type: boolean
+        database_available:
+          type: boolean
+        migrations_applied:
+          type: boolean
+        detail:
+          type: string
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, model_loaded, database_available]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        model_loaded:
+          type: boolean
+        database_available:
+          type: boolean
+        model_name:
+          type: string
+        detail:
+          type: string
+    CountByLabel:
+      type: object
+      additionalProperties: false
+      required: [complaint, question, praise, other]
+      properties:
+        complaint:
+          type: integer
+          minimum: 0
+        question:
+          type: integer
+          minimum: 0
+        praise:
+          type: integer
+          minimum: 0
+        other:
+          type: integer
+          minimum: 0
+    StatsResponse:
+      type: object
+      additionalProperties: false
+      required: [total_predictions, count_by_label, average_confidence, average_processing_time_ms, last_prediction_at]
+      properties:
+        total_predictions:
+          type: integer
+          minimum: 0
+        count_by_label:
+          $ref: "#/components/schemas/CountByLabel"
+        average_confidence:
+          anyOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+            - type: "null"
+        average_processing_time_ms:
+          anyOf:
+            - type: number
+              minimum: 0
+            - type: "null"
+        last_prediction_at:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    ErrorResponse:
+      type: object
+      additionalProperties: true
+      required: [detail]
+      properties:
+        detail:
+          description: Human-readable error detail or structured validation details.
+        request_id:
+          type: string

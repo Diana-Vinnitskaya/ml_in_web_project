@@ -1,0 +1,210 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-rufeedback}"
+      POSTGRES_USER: "${POSTGRES_USER:-rufeedback}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-rufeedback}"
+    expose:
+      - "5432"
+    command: ["postgres", "-p", "5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Изоляция в сети: база данных доступна только backend-сервису во внутренней сети.
+    networks:
+      - backend_net
+    # Compose Healthcheck
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-rufeedback} -d ${POSTGRES_DB:-rufeedback} -h 127.0.0.1 -p 5432
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      PROJECT_NAME: "${PROJECT_NAME:-RuFeedback Classifier}"
+      API_PREFIX: "${API_PREFIX:-/api/v1}"
+      MODEL_NAME: "${MODEL_NAME:-local-tfidf-logreg}"
+      MODEL_VERSION: "${MODEL_VERSION:-0.1.0}"
+      MAX_TEXT_LENGTH: "${MAX_TEXT_LENGTH:-2000}"
+      MAX_BATCH_SIZE: "${MAX_BATCH_SIZE:-32}"
+      MODEL_PATH: "${MODEL_PATH:-/app/models/feedback_classifier.joblib}"
+      MODEL_METRICS_PATH: "${MODEL_METRICS_PATH:-/app/models/metrics.json}"
+      TRAIN_DATA_PATH: "${TRAIN_DATA_PATH:-/app/data/train.csv}"
+      DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://rufeedback:rufeedback@postgres:5432/rufeedback}"
+      POSTGRES_DB: "${POSTGRES_DB:-rufeedback}"
+      POSTGRES_USER: "${POSTGRES_USER:-rufeedback}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-rufeedback}"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      BACKEND_HOST: "${BACKEND_HOST:-0.0.0.0}"
+      BACKEND_PORT: "${BACKEND_PORT:-8000}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    expose:
+      - "8000"
+    volumes:
+      - model_data:/app/models
+    # Изоляция в сети: backend видит и UI/proxy, и базу данных, и monitoring.
+    networks:
+      - frontend_net
+      - backend_net
+      - monitoring_net
+    # Умный depends_on
+    # Порядок запуска: backend ждёт готовности PostgreSQL до инициализации приложения.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Compose Healthcheck
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/__setup__').read()"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 30s
+
+  ui:
+    build:
+      context: ./ui
+    restart: unless-stopped
+    environment:
+      UI_HOST: "${UI_HOST:-0.0.0.0}"
+      UI_PORT: "${UI_PORT:-8501}"
+      API_PREFIX: "${API_PREFIX:-/api/v1}"
+      BACKEND_HOST: "backend"
+      BACKEND_PORT: "8000"
+    expose:
+      - "8501"
+    # Изоляция в сети: UI находится только во frontend-сети и не имеет доступа к базе данных.
+    networks:
+      - frontend_net
+    # Умный depends_on
+    # Порядок запуска: Streamlit ждёт backend, чтобы UI открывался уже поверх готового API слоя.
+    depends_on:
+      backend:
+        condition: service_healthy
+    # Compose Healthcheck
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read()"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 20s
+
+  prometheus:
+    build:
+      context: ./monitoring
+      dockerfile: prometheus.Dockerfile
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    expose:
+      - "9090"
+    volumes:
+      - prometheus_data:/prometheus
+    networks:
+      - monitoring_net
+    # Умный depends_on
+    depends_on:
+      backend:
+        condition: service_healthy
+    # Compose Healthcheck
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:9090/-/healthy
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    stop_grace_period: 20s
+
+  grafana:
+    build:
+      context: ./monitoring/grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    expose:
+      - "3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitoring_net
+    # Умный depends_on
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    # Compose Healthcheck
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:3000/api/health
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 20s
+
+  nginx:
+    build:
+      context: ./nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    networks:
+      - frontend_net
+      - monitoring_net
+    # Умный depends_on
+    # Порядок запуска: публичный entrypoint поднимается после UI и backend, чтобы маршрутизация сразу была валидной.
+    depends_on:
+      backend:
+        condition: service_healthy
+      ui:
+        condition: service_healthy
+    # Compose Healthcheck
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+
+# Разделение сетей
+networks:
+  frontend_net:
+    driver: bridge
+  backend_net:
+    driver: bridge
+    internal: true
+  monitoring_net:
+    driver: bridge
+    internal: true
+
+# Управление постоянством данных
+volumes:
+  postgres_data:
+  model_data:
+  prometheus_data:
+  grafana_data:
